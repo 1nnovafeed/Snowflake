@@ -1,0 +1,58 @@
+USE DATABASE DB_NESLE_PROD
+;
+USE SCHEMA TMP_PROD
+;
+CREATE OR REPLACE PROCEDURE MYPROC( date_begin string,date_end string,capteurs array, events array)
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.8'
+  PACKAGES = ('snowflake-snowpark-python')
+  HANDLER = 'run'
+AS
+$$
+import pandas as pd
+import datetime
+
+def run(session,date_begin,date_end,capteurs,events):
+
+  # adjusting tags list Format
+  capteurs = str(capteurs).replace('[','(').replace(']',')')
+  events = str(events).replace('[','(').replace(']',')')
+
+  # construct the queries strings to be execute 
+  query = f"SELECT  DISTINCT T.\"TechnicalName\" TAG, \"TimeStamp\" AS DATETIME,	div0(\"Agg_SUM\",\"Agg_NUM\") AS AVG	FROM DB_NESLE_PROD.ODS_PROD.ODS_HIS_SQL_VALUES V LEFT JOIN DB_NESLE_PROD.TEC_PROD.TEC_SENSOR_TAG_HIST T ON V.\"TagUID\" = T.\"VTagUID\" AND V.DATE_PARIS >= DATETIME_BEGIN_TAG AND V.DATE_PARIS < COALESCE(DATETIME_END_TAG,current_timestamp()) WHERE \"TechnicalName\" IN {capteurs} AND DATE_PARIS   >= \'{date_begin}\' AND DATE_PARIS  < \'{date_end}\'"
+  
+  query2 = f"SELECT DATE_TIME as DATETIME, TAG, STATUS FROM DB_NESLE_PROD.ODS_PROD.ODS_HIS_SQL_EVENT WHERE DATE_TIME_PARIS >= \'{date_begin}\' AND DATE_TIME_PARIS  < \'{date_end}\' AND TAG IN {events}"
+    
+  df1 = pd.DataFrame()
+  df2 = pd.DataFrame()
+   
+  # Execute the SQl queries with the input parameters
+  
+  if (capteurs == []) and (events == []):
+      return "You must specify at least  one of the list of TAGS"
+  else:     
+      if events !=[]:
+            df_events = session.sql(query2).to_pandas()
+            df2 = df_events.pivot(index=['DATETIME'],columns='TAG',values='STATUS')
+            
+      if capteurs !=[]:
+            df_capteurs = session.sql(query).to_pandas()
+            df1 = df_capteurs.pivot(index=['DATETIME'],columns=['TAG'],values='AVG')
+
+     # Join sensors and events 
+      df = pd.concat([df1,df2],axis=1,sort=True)
+      # organize column names and format to export
+      df.reset_index(inplace=True)
+      
+      df.rename(columns={'index':'DATETIME'},inplace =True)
+      df.DATETIME = df.DATETIME.astype('string')
+      df = df.sort_values(by='DATETIME')
+
+      # export the values to a table
+      out_table = f'DB_NESLE_PROD.TMP_PROD.TMP_PROCEDURE'
+      session.create_dataframe(df).write.mode("overwrite").save_as_table(out_table)
+
+      return "Success You can recover your data in "+ out_table
+$$
+;
